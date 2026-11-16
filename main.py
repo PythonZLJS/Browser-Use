@@ -25,7 +25,35 @@ from urllib.request import Request, urlopen
 
 
 APP_DIR = Path(__file__).resolve().parent
-DATA_DIR = APP_DIR / "data"
+
+
+def choose_data_dir() -> Path:
+    """Keep portable data beside the app, but use a writable user folder when installed."""
+    portable = APP_DIR / "data"
+    fallback_root = (
+        Path(os.environ["LOCALAPPDATA"])
+        if os.name == "nt" and os.environ.get("LOCALAPPDATA")
+        else Path.home() / ".local" / "share"
+    )
+    fallback = fallback_root / "BrowserAgent" / "data"
+    for candidate in (portable, fallback):
+        try:
+            candidate.mkdir(parents=True, exist_ok=True)
+            probe = candidate / ".write-test"
+            probe.write_text("ok", encoding="utf-8")
+            probe.unlink()
+            if candidate == fallback and portable != fallback:
+                old_db = portable / "agent_memory.sqlite3"
+                new_db = candidate / "agent_memory.sqlite3"
+                if old_db.is_file() and not new_db.exists():
+                    shutil.copy2(old_db, new_db)
+            return candidate
+        except (OSError, PermissionError):
+            continue
+    raise OSError("No writable application data folder is available.")
+
+
+DATA_DIR = choose_data_dir()
 DB_PATH = DATA_DIR / "agent_memory.sqlite3"
 PROFILE_DIR = DATA_DIR / "browser_profile"
 CONFIG_PATH = DATA_DIR / "app_settings.json"
@@ -143,12 +171,19 @@ class MemoryStore:
                 "id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE COLLATE NOCASE, instructions TEXT NOT NULL, "
                 "created_at TEXT NOT NULL, updated_at TEXT NOT NULL)"
             )
+            db.execute("CREATE INDEX IF NOT EXISTS idx_runs_chat_id ON runs(chat_id, id)")
+            db.execute("CREATE INDEX IF NOT EXISTS idx_records_collection_id ON collection_records(collection_id, id)")
+            db.execute("CREATE INDEX IF NOT EXISTS idx_runs_created_at ON runs(created_at)")
 
     @contextmanager
     def connect(self) -> Iterator[sqlite3.Connection]:
         db = sqlite3.connect(self.db_path, timeout=10)
         db.row_factory = sqlite3.Row
         db.execute("PRAGMA foreign_keys = ON")
+        db.execute("PRAGMA journal_mode = WAL")
+        db.execute("PRAGMA synchronous = NORMAL")
+        db.execute("PRAGMA temp_store = MEMORY")
+        db.execute("PRAGMA cache_size = -16000")
         try:
             yield db
             db.commit()

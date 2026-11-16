@@ -72,8 +72,11 @@ The project now includes a graphical Build Manager (`build_gui_4.py`) so you can
    ```
 2. Click **Install all requirements** before the first build. This installs only the Python project dependencies and PyInstaller required to compile the app. Browser engines are runtime downloads, not compiler inputs, so they are not downloaded during packaging setup.
 3. On Windows, click **Install Windows installer tools**. This installs Inno Setup through `winget` when available and lets the build manager create the `.exe` installer. It now **automatically detects Inno Setup via the Windows Registry** or local AppData folders, so you don't even need to add it to your system PATH!
-4. Choose your output folder and click **Build portable ZIP** or **Build installer**. 
+4. Choose your output folder and click **Build portable ZIP** or **Build installer**. The builder uses a fast onedir build by default, Python bytecode optimization, lean module exclusions, and only the Browser Use code/data it needs. **Use UPX when available** can reduce size further, but may trade a little startup speed for compression. 
    * *Native desktop packaging must be run on the operating system where the result will be used (e.g., build Windows on Windows, macOS on macOS).*
+   * The Windows installer includes a standard uninstaller. Use **Windows Settings → Apps → Installed apps → BrowserAgent → Uninstall**, or run `unins000.exe` from the installation folder. Portable ZIP builds do not include an uninstaller; delete the extracted folder manually.
+
+Installed builds store editable data in `%LOCALAPPDATA%\BrowserAgent\data`, so protected install folders will not cause SQLite read-only errors.
 
 ## 🖱️ How to use it
 

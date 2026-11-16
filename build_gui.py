@@ -26,6 +26,13 @@ except ImportError:
 
 ROOT = Path(__file__).resolve().parent
 DEFAULT_OUTPUT = ROOT / "releases"
+LEAN_EXCLUDES = (
+    "tkinter.test",
+    "pytest",
+    "IPython",
+    "jupyter",
+    "matplotlib",
+)
 
 
 def find_inno_compiler() -> str | None:
@@ -112,6 +119,8 @@ class BuildManager:
         self.version = tk.StringVar(value="1.0.0")
         self.clean_build = tk.BooleanVar(value=True)
         self.include_readme = tk.BooleanVar(value=True)
+        self.compact_build = tk.BooleanVar(value=True)
+        self.use_upx = tk.BooleanVar(value=False)
 
         self._path_row(settings, 0, "Project folder", self.project_dir, self.choose_project)
         self._path_row(settings, 1, "Output folder", self.output_dir, self.choose_output)
@@ -124,6 +133,12 @@ class BuildManager:
         )
         ttk.Checkbutton(settings, text="Include README", variable=self.include_readme).grid(
             row=3, column=2, columnspan=2, sticky="w", pady=(8, 0)
+        )
+        ttk.Checkbutton(settings, text="Compact build", variable=self.compact_build).grid(
+            row=4, column=0, columnspan=2, sticky="w", pady=(8, 0)
+        )
+        ttk.Checkbutton(settings, text="Use UPX when available", variable=self.use_upx).grid(
+            row=4, column=2, columnspan=2, sticky="w", pady=(8, 0)
         )
         settings.columnconfigure(1, weight=1)
         settings.columnconfigure(3, weight=1)
@@ -355,9 +370,20 @@ class BuildManager:
             self.events.put(("log", f"Building {name} for {platform.system()}..."))
             command = [
                 sys.executable, "-m", "PyInstaller", "--noconfirm", "--windowed",
+                "--onedir", "--clean", "--optimize", "2",
                 "--name", name, "--distpath", str(dist), "--workpath", str(work),
-                "--specpath", str(work), "--collect-all", "browser_use", str(entry),
+                "--specpath", str(work), "--collect-submodules", "browser_use",
+                "--collect-data", "browser_use", str(entry),
             ]
+            if self.compact_build.get():
+                for module in LEAN_EXCLUDES:
+                    command.extend(["--exclude-module", module])
+            if self.use_upx.get():
+                upx = shutil.which("upx")
+                if upx:
+                    command.extend(["--upx-dir", str(Path(upx).parent)])
+                else:
+                    self.events.put(("log", "UPX was selected but was not found; continuing without UPX compression."))
             self.events.put(("progress", "15|Packaging application with PyInstaller..."))
             self.run_command(command, cwd=project)
             bundle = dist / name
