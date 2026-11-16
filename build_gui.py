@@ -457,8 +457,8 @@ SolidCompression=yes
 [Files]
 Source: "{bundle}\\*"; DestDir: "{{app}}"; Flags: recursesubdirs ignoreversion
 [Icons]
-Name: "{{autoprograms}}\\{name}"; Filename: "{{app}}\\{name}.exe"
-Name: "{{commondesktop}}\\{name}"; Filename: "{{app}}\\{name}.exe"
+Name: "{{userprograms}}\\{name}"; Filename: "{{app}}\\{name}.exe"
+Name: "{{userdesktop}}\\{name}"; Filename: "{{app}}\\{name}.exe"
 ''',
             encoding="utf-8",
         )
