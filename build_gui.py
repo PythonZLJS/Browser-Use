@@ -38,6 +38,7 @@ class BuildManager:
             style.theme_use("clam")
         style.configure(".", font=("Segoe UI", 10))
         style.configure("Title.TLabel", font=("Segoe UI", 20, "bold"))
+        style.configure("Status.TLabel", foreground="#2563eb", font=("Segoe UI", 10, "bold"))
         style.configure("Hint.TLabel", foreground="#5f6b7a")
         style.configure("Primary.TButton", padding=(14, 8))
 
@@ -49,6 +50,16 @@ class BuildManager:
             text="Create portable builds and native installers for the current operating system.",
             style="Hint.TLabel",
         ).pack(anchor="w", pady=(3, 14))
+        status_bar = ttk.Frame(shell)
+        status_bar.pack(fill="x", pady=(0, 12))
+        self.status = tk.StringVar(value="Ready to build")
+        self.status_label = ttk.Label(status_bar, textvariable=self.status, style="Status.TLabel")
+        self.status_label.pack(side="left")
+        self.progress_value = tk.DoubleVar(value=0)
+        self.progress = ttk.Progressbar(
+            status_bar, variable=self.progress_value, maximum=100, mode="determinate", length=260
+        )
+        self.progress.pack(side="right", fill="x", expand=True, padx=(18, 0))
 
         settings = ttk.LabelFrame(shell, text="Build settings", padding=10)
         settings.pack(fill="x")
@@ -132,13 +143,20 @@ class BuildManager:
                 kind, text = self.events.get_nowait()
                 if kind == "log":
                     self.write_log(text)
+                elif kind == "progress":
+                    value, status = text.split("|", 1)
+                    self.progress_value.set(float(value))
+                    self.status.set(status)
                 elif kind == "done":
                     self.running = False
                     self.set_buttons(True)
+                    self.progress_value.set(100)
+                    self.status.set("Build completed")
                     self.write_log(text)
                 elif kind == "error":
                     self.running = False
                     self.set_buttons(True)
+                    self.status.set("Build failed")
                     self.write_log("ERROR: " + text)
                     messagebox.showerror("Build failed", text)
         except queue.Empty:
@@ -155,6 +173,8 @@ class BuildManager:
             return
         self.running = True
         self.set_buttons(False)
+        self.progress_value.set(0)
+        self.status.set("Preparing build...")
         threading.Thread(target=self.build, args=(action,), daemon=True).start()
 
     def build_portable(self) -> None:
@@ -175,6 +195,7 @@ class BuildManager:
 
     def install_pyinstaller_worker(self) -> None:
         try:
+            self.events.put(("progress", "10|Installing PyInstaller..."))
             self.run_command([sys.executable, "-m", "pip", "install", "pyinstaller"])
             self.events.put(("done", "PyInstaller installation completed."))
         except RuntimeError as exc:
@@ -207,12 +228,14 @@ class BuildManager:
                 shutil.rmtree(dist, ignore_errors=True)
                 shutil.rmtree(work, ignore_errors=True)
 
+            self.events.put(("progress", "5|Checking project files..."))
             self.events.put(("log", f"Building {name} for {platform.system()}..."))
             command = [
                 sys.executable, "-m", "PyInstaller", "--noconfirm", "--windowed",
                 "--name", name, "--distpath", str(dist), "--workpath", str(work),
                 "--specpath", str(work), "--collect-all", "browser_use", str(entry),
             ]
+            self.events.put(("progress", "15|Packaging application with PyInstaller..."))
             self.run_command(command, cwd=project)
             bundle = dist / name
             if not bundle.exists():
@@ -220,12 +243,16 @@ class BuildManager:
             if self.include_readme.get() and (project / "README.md").is_file():
                 shutil.copy2(project / "README.md", bundle / "README.md")
             self.write_release_notes(bundle, name)
+            self.events.put(("progress", "72|Portable application bundle created..."))
             if action in ("portable", "both"):
+                self.events.put(("progress", "82|Creating portable archive..."))
                 archive = self.make_portable_archive(bundle, output, name)
                 self.events.put(("log", f"Portable package: {archive}"))
             if action in ("installer", "both"):
+                self.events.put(("progress", "91|Creating platform installer..."))
                 artifact = self.make_installer(bundle, output, name)
                 self.events.put(("log", f"Installer package: {artifact}"))
+            self.events.put(("progress", "99|Finalizing build outputs..."))
             self.events.put(("done", "Build completed successfully."))
         except (OSError, RuntimeError, ValueError) as exc:
             self.events.put(("error", str(exc)))
