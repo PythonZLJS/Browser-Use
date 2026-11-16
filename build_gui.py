@@ -18,10 +18,53 @@ import tkinter as tk
 import zipfile
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
+try:
+    import winreg
+except ImportError:
+    winreg = None
 
 
 ROOT = Path(__file__).resolve().parent
 DEFAULT_OUTPUT = ROOT / "releases"
+
+
+def find_inno_compiler() -> str | None:
+    """Find Inno Setup even when its installer directory is not on PATH."""
+    candidates = [
+        shutil.which("iscc"),
+        shutil.which("ISCC.exe"),
+        os.environ.get("INNO_SETUP_PATH"),
+        r"C:\Program Files (x86)\Inno Setup 6\ISCC.exe",
+        r"C:\Program Files\Inno Setup 6\ISCC.exe",
+        r"C:\Program Files (x86)\Inno Setup 5\ISCC.exe",
+        r"C:\Program Files\Inno Setup 5\ISCC.exe",
+        str(Path.home() / "AppData" / "Local" / "Programs" / "Inno Setup 6" / "ISCC.exe"),
+        str(Path.home() / "AppData" / "Local" / "Programs" / "Inno Setup 5" / "ISCC.exe"),
+    ]
+    if winreg is not None and os.name == "nt":
+        for root, subkey in (
+            (winreg.HKEY_CURRENT_USER, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"),
+            (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"),
+            (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall"),
+        ):
+            try:
+                with winreg.OpenKey(root, subkey) as uninstall:
+                    for index in range(winreg.QueryInfoKey(uninstall)[0]):
+                        try:
+                            child_name = winreg.EnumKey(uninstall, index)
+                            with winreg.OpenKey(uninstall, child_name) as child:
+                                display_name = str(winreg.QueryValueEx(child, "DisplayName")[0])
+                                install_location = str(winreg.QueryValueEx(child, "InstallLocation")[0])
+                            if "Inno Setup" in display_name and install_location:
+                                candidates.append(str(Path(install_location) / "ISCC.exe"))
+                        except (OSError, FileNotFoundError):
+                            continue
+            except OSError:
+                continue
+    for candidate in candidates:
+        if candidate and Path(candidate).is_file():
+            return str(Path(candidate))
+    return None
 
 
 class BuildManager:
@@ -93,7 +136,16 @@ class BuildManager:
         self.installer_button.pack(side="left", padx=(8, 0))
         self.both_button = ttk.Button(actions, text="Build both", command=self.build_both)
         self.both_button.pack(side="left", padx=(8, 0))
-        ttk.Button(actions, text="Install PyInstaller", command=self.install_pyinstaller).pack(side="right")
+        self.install_pyinstaller_button = ttk.Button(actions, text="Install PyInstaller", command=self.install_pyinstaller)
+        self.install_pyinstaller_button.pack(side="right")
+        self.install_all_button = ttk.Button(
+            actions, text="Install all requirements", command=self.install_all_requirements, style="Primary.TButton"
+        )
+        self.install_all_button.pack(side="right", padx=(0, 8))
+        self.install_installer_button = ttk.Button(
+            actions, text="Install Windows installer tools", command=self.install_windows_tools
+        )
+        self.install_installer_button.pack(side="right", padx=(0, 8))
 
         self.platform_label = ttk.Label(
             shell,
@@ -108,7 +160,7 @@ class BuildManager:
         scrollbar = ttk.Scrollbar(log_frame, orient="vertical", command=self.log.yview)
         scrollbar.pack(side="right", fill="y")
         self.log.configure(yscrollcommand=scrollbar.set)
-        self.write_log("Ready. Use 'Install PyInstaller' once if the build command is unavailable.")
+        self.write_log("Ready. Use 'Install all requirements' before the first build.")
         self.root.after(100, self.drain_events)
 
     def _path_row(
@@ -165,7 +217,11 @@ class BuildManager:
 
     def set_buttons(self, enabled: bool) -> None:
         state = "normal" if enabled else "disabled"
-        for button in (self.portable_button, self.installer_button, self.both_button):
+        for button in (
+            self.portable_button, self.installer_button, self.both_button,
+            self.install_pyinstaller_button, self.install_all_button,
+            self.install_installer_button,
+        ):
             button.configure(state=state)
 
     def run_background(self, action: str) -> None:
@@ -192,6 +248,73 @@ class BuildManager:
         self.running = True
         self.set_buttons(False)
         threading.Thread(target=self.install_pyinstaller_worker, daemon=True).start()
+
+    def install_all_requirements(self) -> None:
+        if self.running:
+            return
+        self.running = True
+        self.set_buttons(False)
+        self.progress_value.set(0)
+        self.status.set("Preparing dependency setup...")
+        threading.Thread(target=self.install_all_worker, daemon=True).start()
+
+    def install_windows_tools(self) -> None:
+        if self.running:
+            return
+        if platform.system() != "Windows":
+            messagebox.showinfo(
+                "Not needed on this platform",
+                "Windows installer tools are only required when building the Windows installer on Windows.",
+            )
+            return
+        if find_inno_compiler():
+            self.status.set("Windows installer tools are already installed")
+            self.write_log("Inno Setup compiler found.")
+            return
+        if not shutil.which("winget"):
+            messagebox.showerror(
+                "Cannot install Windows installer tools",
+                "Inno Setup was not found and winget is unavailable. Install Inno Setup from "
+                "https://jrsoftware.org/isinfo.php, then run this tool again.",
+            )
+            return
+        self.running = True
+        self.set_buttons(False)
+        self.progress_value.set(0)
+        self.status.set("Installing Windows installer tools...")
+        threading.Thread(target=self.install_windows_tools_worker, daemon=True).start()
+
+    def install_windows_tools_worker(self) -> None:
+        try:
+            self.events.put(("progress", "15|Installing Inno Setup..."))
+            self.run_command([
+                "winget", "install", "--id", "JRSoftware.InnoSetup", "--exact",
+                "--silent", "--accept-source-agreements", "--accept-package-agreements",
+            ])
+            if not find_inno_compiler():
+                raise RuntimeError("Inno Setup installation finished, but ISCC.exe was not found. Restart this app and try again.")
+            self.events.put(("done", "Windows installer tools installed successfully."))
+        except (OSError, RuntimeError) as exc:
+            self.events.put(("error", f"Windows installer setup stopped: {exc}"))
+
+    def install_all_worker(self) -> None:
+        try:
+            project = Path(self.project_dir.get()).expanduser().resolve()
+            requirements = project / "requirements.txt"
+            if not requirements.is_file():
+                raise RuntimeError(f"Could not find dependency file: {requirements}")
+            self.events.put(("progress", "5|Checking Python and project files..."))
+            self.run_command([sys.executable, "-m", "pip", "install", "--upgrade", "pip"])
+            self.events.put(("progress", "25|Installing application dependencies..."))
+            self.run_command([sys.executable, "-m", "pip", "install", "-r", str(requirements)])
+            self.events.put(("progress", "55|Installing PyInstaller..."))
+            self.run_command([sys.executable, "-m", "pip", "install", "pyinstaller"])
+            self.events.put(("progress", "78|Checking optional installer tools..."))
+            if platform.system() == "Windows" and not find_inno_compiler():
+                self.events.put(("log", "Inno Setup is not installed. Use 'Install Windows installer tools' before building an EXE installer."))
+            self.events.put(("done", "All requirements installed successfully. You can build now."))
+        except (OSError, RuntimeError) as exc:
+            self.events.put(("error", f"Dependency setup stopped: {exc}"))
 
     def install_pyinstaller_worker(self) -> None:
         try:
@@ -289,9 +412,9 @@ class BuildManager:
         return self.make_linux_installer(bundle, output, name)
 
     def make_windows_installer(self, bundle: Path, output: Path, name: str) -> Path:
-        iscc = shutil.which("iscc") or shutil.which("ISCC.exe")
+        iscc = find_inno_compiler()
         if not iscc:
-            raise RuntimeError("Windows installer needs Inno Setup (ISCC.exe). Install it, add it to PATH, then retry.")
+            raise RuntimeError("Windows installer needs Inno Setup. Click 'Install Windows installer tools', restart this app, then retry.")
         script = output / f"{name}.iss"
         script.write_text(
             f'''[Setup]
