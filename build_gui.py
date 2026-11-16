@@ -420,7 +420,10 @@ class BuildManager:
             f'''[Setup]
 AppName={name}
 AppVersion={self.version.get().strip() or "1.0.0"}
-DefaultDirName={{autopf}}\\{name}
+            DefaultDirName={{localappdata}}\\Programs\\{name}
+            PrivilegesRequired=lowest
+            Uninstallable=yes
+            UninstallDisplayName={name}
 OutputDir={output}
 OutputBaseFilename={name}-installer
 Compression=lzma
