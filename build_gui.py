@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 import platform
 import queue
+import re
 import shutil
 import subprocess
 import sys
@@ -33,6 +34,9 @@ LEAN_EXCLUDES = (
     "jupyter",
     "matplotlib",
 )
+SAFE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+SAFE_VERSION = re.compile(r"^[0-9]+(?:\.[0-9]+){1,3}(?:[-+][A-Za-z0-9.-]+)?$")
+PYINSTALLER_VERSION = "6.22.3"
 
 
 def find_inno_compiler() -> str | None:
@@ -82,6 +86,8 @@ class BuildManager:
         root.minsize(720, 540)
         self.events: queue.Queue[tuple[str, str]] = queue.Queue()
         self.running = False
+        self.build_settings: dict[str, object] = {}
+        self.install_project_dir = str(ROOT)
 
         style = ttk.Style(root)
         if "clam" in style.theme_names():
@@ -226,6 +232,11 @@ class BuildManager:
                     self.status.set("Build failed")
                     self.write_log("ERROR: " + text)
                     messagebox.showerror("Build failed", text)
+        except (ValueError, tk.TclError) as exc:
+            self.running = False
+            self.set_buttons(True)
+            self.status.set("Build manager error")
+            self.write_log("ERROR: Could not update build status: " + str(exc))
         except queue.Empty:
             pass
         self.root.after(100, self.drain_events)
@@ -246,6 +257,16 @@ class BuildManager:
         self.set_buttons(False)
         self.progress_value.set(0)
         self.status.set("Preparing build...")
+        self.build_settings = {
+            "project_dir": self.project_dir.get().strip(),
+            "output_dir": self.output_dir.get().strip(),
+            "app_name": self.app_name.get().strip() or "BrowserAgent",
+            "version": self.version.get().strip() or "1.0.0",
+            "clean_build": self.clean_build.get(),
+            "include_readme": self.include_readme.get(),
+            "compact_build": self.compact_build.get(),
+            "use_upx": self.use_upx.get(),
+        }
         threading.Thread(target=self.build, args=(action,), daemon=True).start()
 
     def build_portable(self) -> None:
@@ -271,6 +292,7 @@ class BuildManager:
         self.set_buttons(False)
         self.progress_value.set(0)
         self.status.set("Preparing dependency setup...")
+        self.install_project_dir = self.project_dir.get().strip()
         threading.Thread(target=self.install_all_worker, daemon=True).start()
 
     def install_windows_tools(self) -> None:
@@ -314,16 +336,21 @@ class BuildManager:
 
     def install_all_worker(self) -> None:
         try:
-            project = Path(self.project_dir.get()).expanduser().resolve()
+            project = Path(self.install_project_dir).expanduser().resolve()
             requirements = project / "requirements.txt"
             if not requirements.is_file():
                 raise RuntimeError(f"Could not find dependency file: {requirements}")
             self.events.put(("progress", "5|Checking Python and project files..."))
-            self.run_command([sys.executable, "-m", "pip", "install", "--upgrade", "pip"])
             self.events.put(("progress", "25|Installing application dependencies..."))
-            self.run_command([sys.executable, "-m", "pip", "install", "-r", str(requirements)])
+            self.run_command([
+                sys.executable, "-m", "pip", "install", "--disable-pip-version-check",
+                "--requirement", str(requirements),
+            ])
             self.events.put(("progress", "55|Installing PyInstaller..."))
-            self.run_command([sys.executable, "-m", "pip", "install", "pyinstaller"])
+            self.run_command([
+                sys.executable, "-m", "pip", "install", "--disable-pip-version-check",
+                f"pyinstaller=={PYINSTALLER_VERSION}",
+            ])
             self.events.put(("progress", "78|Checking optional installer tools..."))
             if platform.system() == "Windows" and not find_inno_compiler():
                 self.events.put(("log", "Inno Setup is not installed. Use 'Install Windows installer tools' before building an EXE installer."))
@@ -334,9 +361,12 @@ class BuildManager:
     def install_pyinstaller_worker(self) -> None:
         try:
             self.events.put(("progress", "10|Installing PyInstaller..."))
-            self.run_command([sys.executable, "-m", "pip", "install", "pyinstaller"])
+            self.run_command([
+                sys.executable, "-m", "pip", "install", "--disable-pip-version-check",
+                f"pyinstaller=={PYINSTALLER_VERSION}",
+            ])
             self.events.put(("done", "PyInstaller installation completed."))
-        except RuntimeError as exc:
+        except (OSError, RuntimeError) as exc:
             self.events.put(("error", str(exc)))
 
     def run_command(self, command: list[str], cwd: Path | None = None) -> None:
@@ -353,16 +383,22 @@ class BuildManager:
 
     def build(self, action: str) -> None:
         try:
-            project = Path(self.project_dir.get()).expanduser().resolve()
-            output = Path(self.output_dir.get()).expanduser().resolve()
+            settings = self.build_settings
+            project = Path(str(settings["project_dir"])).expanduser().resolve()
+            output = Path(str(settings["output_dir"])).expanduser().resolve()
             entry = project / "main.py"
             if not entry.is_file():
                 raise RuntimeError(f"Could not find application entry point: {entry}")
             output.mkdir(parents=True, exist_ok=True)
             dist = output / "dist"
             work = output / "build"
-            name = self.app_name.get().strip() or "BrowserAgent"
-            if self.clean_build.get():
+            name = str(settings["app_name"])
+            version = str(settings["version"])
+            if not SAFE_NAME.fullmatch(name):
+                raise ValueError("Application name must use only letters, numbers, dots, hyphens, and underscores.")
+            if not SAFE_VERSION.fullmatch(version):
+                raise ValueError("Version must look like 1.0.0 and contain no script characters.")
+            if bool(settings["clean_build"]):
                 shutil.rmtree(dist, ignore_errors=True)
                 shutil.rmtree(work, ignore_errors=True)
 
@@ -375,10 +411,10 @@ class BuildManager:
                 "--specpath", str(work), "--collect-submodules", "browser_use",
                 "--collect-data", "browser_use", str(entry),
             ]
-            if self.compact_build.get():
+            if bool(settings["compact_build"]):
                 for module in LEAN_EXCLUDES:
                     command.extend(["--exclude-module", module])
-            if self.use_upx.get():
+            if bool(settings["use_upx"]):
                 upx = shutil.which("upx")
                 if upx:
                     command.extend(["--upx-dir", str(Path(upx).parent)])
@@ -389,7 +425,7 @@ class BuildManager:
             bundle = dist / name
             if not bundle.exists():
                 raise RuntimeError(f"PyInstaller did not create the expected bundle: {bundle}")
-            if self.include_readme.get() and (project / "README.md").is_file():
+            if bool(settings["include_readme"]) and (project / "README.md").is_file():
                 shutil.copy2(project / "README.md", bundle / "README.md")
             self.write_release_notes(bundle, name)
             self.events.put(("progress", "72|Portable application bundle created..."))
@@ -414,9 +450,18 @@ class BuildManager:
             encoding="utf-8",
         )
 
+    def package_version(self) -> str:
+        return str(self.build_settings.get("version") or self.version.get().strip() or "1.0.0")
+
+    @staticmethod
+    def inno_value(value: str) -> str:
+        if "\r" in value or "\n" in value:
+            raise ValueError("Installer values cannot contain newlines.")
+        return value.replace('"', '""')
+
     def make_portable_archive(self, bundle: Path, output: Path, name: str) -> Path:
         suffix = "windows" if os.name == "nt" else platform.system().lower()
-        archive = output / f"{name}-{self.version.get().strip() or '1.0.0'}-{suffix}"
+        archive = output / f"{name}-{self.package_version()}-{suffix}"
         if os.name == "nt":
             archive = archive.with_suffix(".zip")
             with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as zipped:
@@ -441,24 +486,33 @@ class BuildManager:
         iscc = find_inno_compiler()
         if not iscc:
             raise RuntimeError("Windows installer needs Inno Setup. Click 'Install Windows installer tools', restart this app, then retry.")
+        if not SAFE_NAME.fullmatch(name):
+            raise ValueError("Application name must use only letters, numbers, dots, hyphens, and underscores.")
+        version = self.package_version()
+        if not SAFE_VERSION.fullmatch(version):
+            raise ValueError("Version must look like 1.0.0 and contain no script characters.")
+        safe_name = self.inno_value(name)
+        safe_version = self.inno_value(version)
+        safe_bundle = self.inno_value(str(bundle))
+        safe_output = self.inno_value(str(output))
         script = output / f"{name}.iss"
         script.write_text(
             f'''[Setup]
-AppName={name}
-AppVersion={self.version.get().strip() or "1.0.0"}
-            DefaultDirName={{localappdata}}\\Programs\\{name}
-            PrivilegesRequired=lowest
-            Uninstallable=yes
-            UninstallDisplayName={name}
-OutputDir={output}
-OutputBaseFilename={name}-installer
+AppName={safe_name}
+AppVersion={safe_version}
+DefaultDirName={{localappdata}}\\Programs\\{safe_name}
+PrivilegesRequired=lowest
+Uninstallable=yes
+UninstallDisplayName={safe_name}
+OutputDir="{safe_output}"
+OutputBaseFilename={safe_name}-installer
 Compression=lzma
 SolidCompression=yes
 [Files]
-Source: "{bundle}\\*"; DestDir: "{{app}}"; Flags: recursesubdirs ignoreversion
+Source: "{safe_bundle}\\*"; DestDir: "{{app}}"; Flags: recursesubdirs ignoreversion
 [Icons]
-Name: "{{userprograms}}\\{name}"; Filename: "{{app}}\\{name}.exe"
-Name: "{{userdesktop}}\\{name}"; Filename: "{{app}}\\{name}.exe"
+Name: "{{userprograms}}\\{safe_name}"; Filename: "{{app}}\\{safe_name}.exe"
+Name: "{{userdesktop}}\\{safe_name}"; Filename: "{{app}}\\{safe_name}.exe"
 ''',
             encoding="utf-8",
         )
@@ -473,12 +527,15 @@ Name: "{{userdesktop}}\\{name}"; Filename: "{{app}}\\{name}.exe"
         shutil.rmtree(staging, ignore_errors=True)
         staging.mkdir()
         shutil.copytree(bundle, staging / bundle.name)
-        dmg = output / f"{name}-{self.version.get().strip() or '1.0.0'}.dmg"
+        dmg = output / f"{name}-{self.package_version()}.dmg"
         self.run_command([hdiutil, "create", "-volname", name, "-srcfolder", str(staging), "-ov", "-format", "UDZO", str(dmg)])
         shutil.rmtree(staging, ignore_errors=True)
         return dmg
 
     def make_linux_installer(self, bundle: Path, output: Path, name: str) -> Path:
+        if not SAFE_NAME.fullmatch(name):
+            raise ValueError("Application name must use only letters, numbers, dots, hyphens, and underscores.")
+        safe_name = name
         installer_dir = output / f"{name}-installer"
         shutil.rmtree(installer_dir, ignore_errors=True)
         installer_dir.mkdir()
@@ -486,16 +543,16 @@ Name: "{{userdesktop}}\\{name}"; Filename: "{{app}}\\{name}.exe"
         (installer_dir / "install.sh").write_text(
             f'''#!/bin/sh
 set -eu
-TARGET="${{1:-$HOME/.local/opt/{name}}}"
+TARGET="${{1:-$HOME/.local/opt/{safe_name}}}"
 mkdir -p "$TARGET"
-cp -R "$(dirname "$0")/{name}/." "$TARGET/"
-printf '%s\\n' "Installed {name} to $TARGET"
-printf '%s\\n' "Run: $TARGET/{name}"
+cp -R "$(dirname "$0")/{safe_name}/." "$TARGET/"
+printf '%s\\n' "Installed {safe_name} to $TARGET"
+printf '%s\\n' "Run: $TARGET/{safe_name}"
 ''',
             encoding="utf-8",
         )
         os.chmod(installer_dir / "install.sh", 0o755)
-        archive = output / f"{name}-{self.version.get().strip() or '1.0.0'}-linux-installer.tar.gz"
+        archive = output / f"{name}-{self.package_version()}-linux-installer.tar.gz"
         with tarfile.open(archive, "w:gz") as tar:
             tar.add(installer_dir, arcname=installer_dir.name)
         shutil.rmtree(installer_dir, ignore_errors=True)

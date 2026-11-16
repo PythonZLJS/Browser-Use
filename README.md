@@ -59,16 +59,16 @@ pip install -r requirements.txt
 
 ### 5. Run the app
 ```bash
-python main_7.py
+python main.py
 ```
 
 ## 📦 Building your own executables
 
-The project now includes a graphical Build Manager (`build_gui_4.py`) so you can easily package the app for your current operating system. 
+The project now includes a graphical Build Manager (`build_gui.py`) so you can easily package the app for your current operating system. 
 
 1. Run the build manager:
    ```bash
-   python build_gui_4.py
+   python build_gui.py
    ```
 2. Click **Install all requirements** before the first build. This installs only the Python project dependencies and PyInstaller required to compile the app. Browser engines are runtime downloads, not compiler inputs, so they are not downloaded during packaging setup.
 3. On Windows, click **Install Windows installer tools**. This installs Inno Setup through `winget` when available and lets the build manager create the `.exe` installer. It now **automatically detects Inno Setup via the Windows Registry** or local AppData folders, so you don't even need to add it to your system PATH!
@@ -103,8 +103,8 @@ Once you run the application for the first time, it automatically generates a lo
 
 ```text
 browser-agent/
-├── main_7.py                 # Core application engine and GUI
-├── build_gui_4.py            # Cross-platform GUI builder for making executables
+├── main.py                   # Core application engine and GUI
+├── build_gui.py              # Cross-platform GUI builder for making executables
 ├── requirements.txt          # Python dependencies
 └── data/                     # (Auto-generated) 100% local storage directory
     ├── agent_memory.sqlite3  # SQLite database for history, actions, and collections
