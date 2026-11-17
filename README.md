@@ -124,3 +124,9 @@ For a screen handoff, include the stopping point and your action in the task, fo
 The agent uses its own browser profile, or a temporary profile when saved logins are disabled. The optional navigation guard blocks file URLs, localhost destinations, and direct IP-address URLs. This is a navigation restriction, not a complete operating-system sandbox: page subrequests and the connection to the configured AI provider are outside the guard.
 
 Frozen builds collect Browser Use's modules and runtime assets. Their editable data is stored beside the executable when writable, with the normal per-user data folder as a fallback.
+
+## Periodic screen checks and keeping the browser open
+
+The agent runs in five-step batches. At each checkpoint it requests a fresh screen/page inspection, incorporates any changes you made, and continues the same task. The task is capped at 100 agent steps.
+
+Select **Keep browser open after task finishes** before starting a task to leave its visible browser window open when the task completes. Use **Close kept browser** to shut it down; starting another task also closes the previous kept window first.

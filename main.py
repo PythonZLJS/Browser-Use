@@ -743,6 +743,9 @@ class LocalBrowserAgentApp:
         self.active_chat_id = self.store.create_chat("New chat")
         self.chat_display_ids: dict[str, int] = {}
         self.worker: threading.Thread | None = None
+        self.kept_browser: object | None = None
+        self.browser_closing = False
+        self.close_window_after_browser = False
         self.loop: asyncio.AbstractEventLoop | None = None
         self.agent_task: asyncio.Task | None = None
         self.followup_queue: queue.Queue[str] = queue.Queue()
@@ -1150,7 +1153,7 @@ class LocalBrowserAgentApp:
         ttk.Button(chat_controls, text="Delete", command=self.delete_current_chat).pack(side="left", padx=(6, 0))
         description = ttk.Label(
             tab,
-            text="Ask a question or describe a task. The browser opens in a separate, interactive window while this app stays responsive. You can queue follow-ups; ask the agent to wait for you before taking over the page manually.",
+            text="Ask a question or describe a task. The browser opens in a separate, interactive window while this app stays responsive. It rechecks the page every five agent steps to account for your changes. You can queue follow-ups or ask the agent to wait while you take over.",
             style="Hint.TLabel",
             wraplength=900,
         )
@@ -1175,6 +1178,12 @@ class LocalBrowserAgentApp:
         composer_top.pack(fill="x")
         self.visible = tk.BooleanVar(value=True)
         ttk.Checkbutton(composer_top, text="Show browser", variable=self.visible).pack(side="left")
+        self.keep_browser_open = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            composer_top,
+            text="Keep browser open after task finishes",
+            variable=self.keep_browser_open,
+        ).pack(side="left", padx=(12, 0))
         ttk.Label(
             composer_top,
             text="Ctrl + Enter to send",
@@ -1195,6 +1204,10 @@ class LocalBrowserAgentApp:
         self.start_button.pack(side="right")
         self.stop_button = ttk.Button(composer_buttons, text="Stop", command=self.stop, state="disabled")
         self.stop_button.pack(side="right", padx=(0, 8))
+        self.close_browser_button = ttk.Button(
+            composer_buttons, text="Close kept browser", command=self.close_kept_browser, state="disabled"
+        )
+        self.close_browser_button.pack(side="right", padx=(0, 8))
         ttk.Label(
             composer_buttons,
             text="Describe a task, paste a URL, or choose a quick start above.",
@@ -2416,6 +2429,9 @@ class LocalBrowserAgentApp:
         return list(dict.fromkeys(found))
 
     def start(self, task_override: str | None = None) -> None:
+        if self.browser_closing:
+            self.status.set("Wait for the kept browser to close before starting another task")
+            return
         if self.worker and self.worker.is_alive():
             return
         task = (task_override if task_override is not None else self.task.get("1.0", "end-1c")).strip()
@@ -2438,6 +2454,7 @@ class LocalBrowserAgentApp:
             messagebox.showerror("API key required", f"Enter an API key for {provider} before starting a task.")
             return
         show_browser = self.visible.get()
+        keep_browser_open = self.keep_browser_open.get()
         keep_profile = self.keep_profile.get()
         restrict_browser = self.restrict_browser.get()
         chat_id = self.active_chat_id
@@ -2446,6 +2463,8 @@ class LocalBrowserAgentApp:
         self.set_text(self.task, "")
         self.start_button.configure(text="Starting…", state="normal")
         self.stop_button.configure(state="normal")
+        if self.kept_browser is not None:
+            self.close_browser_button.configure(state="disabled")
         self.clear_memory_button.configure(state="disabled")
         self.status.set("Running browser task...")
         self.activity_bar.start(90)
@@ -2461,14 +2480,16 @@ class LocalBrowserAgentApp:
                     break
         self.worker = threading.Thread(
             target=self.run_task,
-            args=(task, prompt, provider, model, base, api_key, show_browser, keep_profile, restrict_browser, chat_id),
+            args=(task, prompt, provider, model, base, api_key, show_browser, keep_profile, restrict_browser,
+                  keep_browser_open, chat_id),
             daemon=True,
         )
         self.worker.start()
 
     def run_task(
         self, original_task: str, prompt: str, provider: str, model: str, base: str,
-        api_key: str, show_browser: bool, keep_profile: bool, restrict_browser: bool, chat_id: int,
+        api_key: str, show_browser: bool, keep_profile: bool, restrict_browser: bool,
+        keep_browser_open: bool, chat_id: int,
     ) -> None:
         logger = logging.getLogger("browser_use")
         handler = BrowserProgressHandler(self)
@@ -2479,6 +2500,12 @@ class LocalBrowserAgentApp:
             async def run() -> None:
                 self.loop = asyncio.get_running_loop()
                 self.agent_task = asyncio.current_task()
+                previous_browser = self.kept_browser
+                if previous_browser is not None:
+                    self.post_progress("Closing the browser left open from the previous task...")
+                    await previous_browser.stop()
+                    self.kept_browser = None
+                    self.root.after(0, self.close_browser_button.configure, {"state": "disabled"})
                 browser_options: dict[str, object] = {"headless": not show_browser}
                 browser_options["keep_alive"] = True
                 if self.brave_path:
@@ -2728,10 +2755,39 @@ class LocalBrowserAgentApp:
                 try:
                     current_task = original_task
                     self.post_progress("Agent is reviewing the task and planning its next browser step…")
-                    result = await agent.run()
+                    steps_for_current_task = 0
+                    keep_open_after_completion = False
+                    # Browser Use reserves the final request at the limit for
+                    # delivering a result, so six requests allow five work steps.
+                    result = await agent.run(max_steps=6)
                     while True:
+                        steps_for_current_task += min(5, int(getattr(result, "steps", 0) or 0))
+                        needs_screen_check = (
+                            getattr(result, "status", "") == "max_steps"
+                            or (
+                                getattr(result, "status", "") == "completed"
+                                and getattr(result, "success", None) is False
+                                and int(getattr(result, "steps", 0) or 0) >= 5
+                            )
+                        )
+                        if needs_screen_check and steps_for_current_task < 100:
+                            self.post_progress(
+                                f"Checking the browser screen after {steps_for_current_task} agent steps..."
+                            )
+                            agent.add_new_task(
+                                "Continue the user's original task. First take a fresh screenshot if available and "
+                                "inspect the current live browser page using page_info or the available inspection tools. Compare it with the prior "
+                                "state, preserve any changes the user made manually, and continue from the actual "
+                                "current state."
+                            )
+                            result = await agent.run(max_steps=6)
+                            continue
                         if getattr(result, "status", "") == "error":
                             output = "Run failed: " + str(getattr(result, "error", None) or "Unknown Browser Use error")
+                        elif getattr(result, "status", "") == "max_steps":
+                            output = "Stopped after 100 agent steps. Partial result: " + str(
+                                getattr(result, "partial", None) or getattr(result, "text", "No partial result was returned.")
+                            )
                         else:
                             output = str(result.final_result() or "Task finished without a text result.")
                         saved_task = current_task
@@ -2750,18 +2806,29 @@ class LocalBrowserAgentApp:
                                 self.accept_followups = False
                                 current_task = ""
                         if not current_task:
+                            keep_open_after_completion = (
+                                keep_browser_open and show_browser
+                                and getattr(result, "status", "") == "completed"
+                                and not (needs_screen_check and steps_for_current_task >= 100)
+                            )
                             break
                         self.post_progress("Starting your queued follow-up: " + current_task)
+                        steps_for_current_task = 0
                         agent.add_new_task(current_task)
                         self.post_progress("Agent is planning the next step for your follow-up…")
-                        result = await agent.run()
+                        result = await agent.run(max_steps=6)
                 finally:
                     with self.followup_lock:
                         self.accept_followups = False
                     try:
                         await agent.close()
                     finally:
-                        await browser.stop()
+                        if keep_open_after_completion:
+                            self.kept_browser = browser
+                            self.root.after(0, self.kept_browser_ready)
+                            self.post_progress("Task complete. The browser is still open; use Close kept browser when finished.")
+                        else:
+                            await browser.stop()
 
             logger.addHandler(handler)
             if logger.getEffectiveLevel() > logging.INFO:
@@ -2871,10 +2938,45 @@ class LocalBrowserAgentApp:
         self.start_button.configure(state="normal")
         self.start_button.configure(text="Send")
         self.stop_button.configure(state="disabled")
+        self.close_browser_button.configure(state="normal" if self.kept_browser is not None else "disabled")
         self.activity_bar.stop()
         self.clear_memory_button.configure(state="normal")
-        self.status.set("Ready")
+        self.status.set("Task complete — browser left open" if self.kept_browser is not None else "Ready")
         self.refresh_data_manager()
+
+    def kept_browser_ready(self) -> None:
+        self.close_browser_button.configure(state="normal")
+        self.status.set("Task complete — browser left open")
+
+    def close_kept_browser(self) -> None:
+        browser = self.kept_browser
+        if browser is None or self.browser_closing:
+            return
+        self.browser_closing = True
+        self.close_browser_button.configure(state="disabled", text="Closing browser...")
+        threading.Thread(target=self._close_kept_browser_worker, args=(browser,), daemon=True).start()
+
+    def _close_kept_browser_worker(self, browser: object) -> None:
+        error = ""
+        try:
+            asyncio.run(browser.stop())
+        except Exception as exc:
+            error = str(exc)
+        self.root.after(0, self.kept_browser_closed, browser, error)
+
+    def kept_browser_closed(self, browser: object, error: str = "") -> None:
+        self.browser_closing = False
+        if error:
+            self.write_log("Could not close the kept browser: " + error)
+            self.close_browser_button.configure(state="normal", text="Close kept browser")
+            self.close_window_after_browser = False
+        else:
+            if self.kept_browser is browser:
+                self.kept_browser = None
+            self.close_browser_button.configure(state="disabled", text="Close kept browser")
+            self.status.set("Browser closed")
+        if self.close_window_after_browser and not error:
+            self.root.destroy()
 
     def refresh_history(self) -> None:
         if not hasattr(self, "history_text"):
@@ -3048,6 +3150,10 @@ class LocalBrowserAgentApp:
             self.save_settings()
         except OSError as exc:
             logging.getLogger(__name__).warning("Could not save settings: %s", exc)
+        if self.kept_browser is not None and not (self.worker and self.worker.is_alive()):
+            self.close_window_after_browser = True
+            self.close_kept_browser()
+            return
         if self.worker and self.worker.is_alive():
             self.stop()
         self.root.destroy()
