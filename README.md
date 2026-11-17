@@ -115,3 +115,12 @@ browser-agent/
 ## 📜 License
 
 MIT — do whatever you like with it.
+## Browser interaction and isolation
+
+The visible browser runs in a separate window while the desktop app remains responsive. Follow-ups can be queued while the browser or model starts. Ask the agent to use `wait_for_user` when you want it to stop and let you take over the page; otherwise it may continue interacting with the same tab.
+
+For a screen handoff, include the stopping point and your action in the task, for example: "Open the checkout page, then wait for me to choose the shipping option. Continue after I click Done." The agent pauses at that point, the checkpoint panel tells you to use the open browser, and **Done — continue** resumes the task after you finish.
+
+The agent uses its own browser profile, or a temporary profile when saved logins are disabled. The optional navigation guard blocks file URLs, localhost destinations, and direct IP-address URLs. This is a navigation restriction, not a complete operating-system sandbox: page subrequests and the connection to the configured AI provider are outside the guard.
+
+Frozen builds collect Browser Use's modules and runtime assets. Their editable data is stored beside the executable when writable, with the normal per-user data folder as a fallback.

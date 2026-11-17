@@ -408,8 +408,7 @@ class BuildManager:
                 sys.executable, "-m", "PyInstaller", "--noconfirm", "--windowed",
                 "--onedir", "--clean", "--optimize", "2",
                 "--name", name, "--distpath", str(dist), "--workpath", str(work),
-                "--specpath", str(work), "--collect-submodules", "browser_use",
-                "--collect-data", "browser_use", str(entry),
+                "--specpath", str(work), "--collect-all", "browser_use", str(entry),
             ]
             if bool(settings["compact_build"]):
                 for module in LEAN_EXCLUDES:
